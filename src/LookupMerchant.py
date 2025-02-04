@@ -2,6 +2,7 @@ import re
 import requests
 import urllib.parse
 import os
+import csv
 from dotenv import load_dotenv
 
 
@@ -14,7 +15,7 @@ def encode_url(base_url, params):
     return encoded_url
 
 def extract_transaction_details(transaction_string):
-    pattern = r"(?P<type>PURCHASE AUTHORIZED|POS|CHARGE)\s+ON\s+(?P<date>\d{2}/\d{2})\s+(?P<processor>\w+)\s+\*(?P<merchant>[A-Za-z0-9 &]+)\s+(?P<location>[A-Za-z ]+)\s+(?P<mid>S\d+)\s+CARD\s+(?P<card>\d{4})"
+    pattern = r"(?P<type>(PURCHASE|RECURRING PAYMENT))\s+(?:AUTHORIZED|POS|CHARGE)\s+ON\s+(?P<date>\d{2}/\d{2})\s+(?:(?P<processor>\w+)\s*\*)?\s*(?P<merchant>[A-Za-z0-9 &#*-.]+)\s+(?P<location>[A-Za-z ]+)\s+(?P<mid>[A-Z]{1}\d+)\s+CARD\s+(?P<card>\d{4})"
     match = re.search(pattern, transaction_string)
     return match.groupdict() if match else None
 
@@ -26,7 +27,8 @@ def identify_payment_processor(processor_code):
         "CLOVER": "Clover",
         "AMZN": "Amazon",
         "ZELLE": "Zelle",
-        "VENMO": "Venmo"
+        "VENMO": "Venmo",
+        "TST": "Toast"
     }
     return processors.get(processor_code, "Unknown Processor")
 
@@ -39,12 +41,10 @@ def lookup_merchant_info(place_id, api_key):
 def get_place_id(api_key, place_name, location):
     # Construct the Text Search API URL
     base_url = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
-
-    url = encode_url(base_url, {"input": place_name + " " + location, "inputtype":"textquery", "fields":"name,place_id", "key":api_key})
+    url = encode_url(base_url, {"input": re.sub(r'\d+[-]?\d*', '', place_name) + " " + location, "inputtype":"textquery", "fields":"name,place_id", "key":api_key})
 
     # Send the GET request to the Google Places API
     response = requests.get(url)
-    
     if response.status_code == 200:
         data = response.json()
 
@@ -79,25 +79,40 @@ def extract_business_with_google_places_api(transaction_string, api_key):
         return
     
     # use the google place details api to obtain their place ID for use in the place details api
-    details["placeId"], details["merchant_info"] = get_place_id(api_key, details["merchant"], details["location"])
+    result = get_place_id(api_key, details["merchant"], details["location"])
 
-    # details["processor_name"] = identify_payment_processor(details["processor"])
+    details["placeId"], details["merchant_info"] = "", ""
+    if result is not None:
+        details["placeId"], details["merchant_info"] = result        
+
     if details["placeId"] and not details["merchant_info"]:
-      details["merchant_info"] = lookup_merchant_info(details["placeId"], api_key)
-    details["mcc_category"] = get_mcc_category("5812")  # Example MCC code
-    
-    print(details)
+        details["merchant_info"] = lookup_merchant_info(details["placeId"], api_key)
+        
+    # print(details)
     return details["merchant_info"]
 
-def main():
+def main(input_file, output_file):
     load_dotenv()
     GPT_API_KEY = os.getenv("OAI_GPT_API_KEY")
     GOOG_MAPS_API_KEY = os.getenv("GOOG_MAPS_API_KEY")
+    labelled_rows = []
+    # transaction_string = "PURCHASE AUTHORIZED ON 01/01 SQ *PROOF WINE & S Denver CO S384033859155009 CARD 4987"
     
-    transaction_string = "PURCHASE AUTHORIZED ON 01/01 SQ *PROOF WINE & S Denver CO S384033859155009 CARD 4987"
-    
-    merchant_info = extract_business_with_google_places_api(transaction_string, GOOG_MAPS_API_KEY)
-    print(f"Merchant info:{merchant_info}")
+    with open(input_file, 'r') as infile:
+        reader = csv.reader(infile)
+        rows = list(reader)
+        header = rows[0]  # Keep the header row
+
+        for row in rows[1:]:
+            transaction = row
+            if transaction:
+                merchant_info = extract_business_with_google_places_api(transaction[0], GOOG_MAPS_API_KEY)
+                labelled_rows.append(merchant_info)
+
+    # merchant_info = extract_business_with_google_places_api(transaction_string, GOOG_MAPS_API_KEY)
+    print(labelled_rows)
 
 if __name__ == "__main__":
-    main()
+    input_file = "ExpenditureStringTest.csv"  # Input CSV file
+    output_file = "ExpenditureStringTestOut.csv"  # Output CSV file
+    main(input_file, output_file)
